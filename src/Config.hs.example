@@ -1,0 +1,10 @@
+{-# LANGUAGE OverloadedStrings #-}
+module Config where
+
+import Data.ByteString (ByteString)
+
+databaseConnection :: ByteString
+databaseConnection = "postgres://user@host/database"
+
+slackToken :: ByteString
+slackToken = "xoxp-***"

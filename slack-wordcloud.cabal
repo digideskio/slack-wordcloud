@@ -20,8 +20,23 @@ executable slack-wordcloud
   -- other-modules:
   -- other-extensions:
   build-depends:       base >=4.8 && <4.9,
-                       websockets,
+                       aeson,
+                       attoparsec,
+                       bytestring,
+                       lens,
+                       lens-aeson,
+                       monad-logger,
+                       network-uri,
                        persistent,
-                       persistent-postgresql
+                       persistent-postgresql,
+                       persistent-template,
+                       random,
+                       resource-pool,
+                       text,
+                       transformers,
+                       websockets,
+                       wreq,
+                       wuss
   hs-source-dirs:      src
+  ghc-options: -Wall
   default-language:    Haskell2010
