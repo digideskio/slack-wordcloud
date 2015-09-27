@@ -106,5 +106,6 @@ words :: Parser [Text]
 words = Attoparsec.takeWhile isAlphaNum `sepBy` anyChar
 
 extractWords :: Text -> [Text]
-extractWords input = Prelude.filter (not . T.null) $ parseOnly Main.words input ^. _Right
+extractWords input = Prelude.filter f $ parseOnly Main.words input ^. _Right
+  where f word = not (T.null word) && not (T.all isDigit word)
 
