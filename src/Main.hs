@@ -20,6 +20,7 @@ import Data.Aeson
 import Data.Aeson.Lens
 import Data.Char
 import qualified Data.List as List
+import Data.Maybe
 import Data.Monoid
 import Data.Text as T
 import Data.Word
@@ -37,6 +38,8 @@ SlackWord sql=words
   channelName Text sql=channel
   body Text
   occurences Int
+BannedWord sql=banned_words
+  body Text
 |]
 
 createIndex :: MonadIO m => Text -> Text -> SqlPersistT m ()
@@ -53,6 +56,7 @@ main = runStderrLoggingT $ withPostgresqlPool databaseConnection 10 $ \pool -> d
     createIndex "index_words_on_channel" "words (channel)"
     createIndex "index_words_on_body" "words (body)"
     createIndex "index_words_on_occurences" "words (occurences)"
+    createIndex "index_banned_words_on_body" "banned_words (body)"
 
   liftIO $ do
     response <- post slackRtmStartUrl
@@ -66,8 +70,11 @@ main = runStderrLoggingT $ withPostgresqlPool databaseConnection 10 $ \pool -> d
           Just auth' = uriAuthority uri
           host = uriRegName auth'
           path' = uriPath uri
-          commands = [wordrank, trackWords]
+          commands = [wordrank, banWords, trackWords]
       runSecureClient host 443 path' (client pool commands)
+
+isBanned :: MonadIO m => Text -> SqlPersistT m Bool
+isBanned word = isJust <$> selectFirst [BannedWordBody ==. word] []
 
 data Command = Command { commandMatches  :: Text -> Bool
                        , commandAction   :: Text -> Text -> SqlPersistT IO (Maybe Value)
@@ -92,9 +99,23 @@ trackWords = Command (const True) action
   where action channel body = pure Nothing <* traverse (trackWord channel) (extractWords body)
         trackWord channel word = do
           res <- selectFirst [SlackWordBody ==. word, SlackWordChannelName ==. channel] []
-          case res of
-            Just (Entity wordKey _) -> void $ update wordKey [SlackWordOccurences +=. 1]
-            Nothing -> void $ insert $ SlackWord channel word 1
+          banned <- isBanned word
+          unless banned $ do
+            case res of
+              Just (Entity wordKey _) -> update wordKey [SlackWordOccurences +=. 1]
+              Nothing -> void $ insert $ SlackWord channel word 1
+
+banWords :: Command
+banWords = Command matcher action
+  where matcher = T.isPrefixOf "!wordban"
+        action _ body = do
+          let words = extractWords (T.drop (T.length "!wordban") body)
+          absent <- traverse isBanned words
+          let toAdd = fst <$> Prelude.filter (not . snd) (Prelude.zip words absent)
+              ban word = deleteWhere [SlackWordBody ==. word]
+          void $ traverse (insert . BannedWord) toAdd
+          void $ traverse ban toAdd
+          pure Nothing
 
 client :: ConnectionPool -> [Command] -> WebSockets.Connection -> IO ()
 client pool commands conn = forever $ do
