@@ -16,10 +16,10 @@ import Control.Monad.IO.Class (liftIO, MonadIO)
 import Control.Monad.Logger (runStderrLoggingT)
 import Database.Persist.Postgresql
 import Database.Persist.TH
-import Data.Attoparsec.Text as Attoparsec
 import Data.Aeson
 import Data.Aeson.Lens
 import Data.Char
+import qualified Data.List as List
 import Data.Monoid
 import Data.Text as T
 import Data.Word
@@ -66,46 +66,56 @@ main = runStderrLoggingT $ withPostgresqlPool databaseConnection 10 $ \pool -> d
           Just auth' = uriAuthority uri
           host = uriRegName auth'
           path' = uriPath uri
-      runSecureClient host 443 path' (client pool)
+          commands = [wordrank, trackWords]
+      runSecureClient host 443 path' (client pool commands)
 
-client :: ConnectionPool -> WebSockets.Connection -> IO ()
-client pool conn = forever $ do
+data Command = Command { commandMatches  :: Text -> Bool
+                       , commandAction   :: Text -> Text -> SqlPersistT IO (Maybe Value)
+                       -- , commandFollowup :: Maybe (Value -> SqlPersistT IO (Maybe Value))
+                       }
+
+wordrank :: Command
+wordrank = Command matcher action
+  where matcher = T.isPrefixOf "!wordrank"
+        action channel _ = do
+          ranked <- selectList [SlackWordChannelName ==. channel] [Desc SlackWordOccurences, LimitTo 10]
+          liftIO $ print (slackWordBody . entityVal <$> ranked)
+          let ranked' = Prelude.zip (entityVal <$> ranked) [(1 :: Word32)..]
+              text = T.unlines $ (\(word, ix) -> T.pack (show ix) <> ". " <> slackWordBody word <> " - " <> T.pack (show (slackWordOccurences word))) <$> ranked'
+          id <- liftIO (randomIO :: IO Word64)
+          return $ pure $ object [ "id" .= id, "channel" .= channel
+                                 , "type" .= ("message" :: Text), "text" .= text
+                                 ]
+
+trackWords :: Command
+trackWords = Command (const True) action
+  where action channel body = pure Nothing <* traverse (trackWord channel) (extractWords body)
+        trackWord channel word = do
+          res <- selectFirst [SlackWordBody ==. word, SlackWordChannelName ==. channel] []
+          case res of
+            Just (Entity wordKey _) -> void $ update wordKey [SlackWordOccurences +=. 1]
+            Nothing -> void $ insert $ SlackWord channel word 1
+
+client :: ConnectionPool -> [Command] -> WebSockets.Connection -> IO ()
+client pool commands conn = forever $ do
   input <- receiveData conn
   case decode input of
     Just (msg :: Value) -> (flip runSqlPool pool) $ do
       when (Just "message" == msg ^? key "type" . _String) $ do
         let body = msg ^. key "text" . _String
             channel = msg ^. key "channel" . _String
-        liftIO $ print msg
-        if "!wordrank" `T.isPrefixOf` body
-          then do
-            wordRank <- getWordRank channel
-            liftIO $ print wordRank
-            liftIO $ sendTextData conn (encode wordRank)
-          else
-            void $ traverse (trackWord channel) (extractWords body)
-    Nothing -> return ()
-
-trackWord :: MonadIO m => Text -> Text -> SqlPersistT m ()
-trackWord channel word = do
-  res <- selectFirst [SlackWordBody ==. word, SlackWordChannelName ==. channel] []
-  case res of
-    Just (Entity wordKey word) -> void $ update wordKey [SlackWordOccurences +=. 1]
-    Nothing -> void $ insert $ SlackWord channel word 1
-
-getWordRank :: MonadIO m => Text -> SqlPersistT m Value
-getWordRank channel = do
-  ranked <- selectList [SlackWordChannelName ==. channel] [Desc SlackWordOccurences, LimitTo 10]
-  liftIO $ print (slackWordBody . entityVal <$> ranked)
-  let ranked' = Prelude.zip (slackWordBody . entityVal <$> ranked) [1..]
-      text = T.unlines $ (\(word, ix) -> T.pack (show ix) <> ". " <> word) <$> ranked'
-  id <- liftIO (randomIO :: IO Word64)
-  return $ object ["id" .= id, "channel" .= channel, "type" .= ("message" :: Text), "text" .= text]
-
-words :: Parser [Text]
-words = Attoparsec.takeWhile isAlphaNum `sepBy` anyChar
+            action = commandAction <$> List.find (\c -> (commandMatches c) body) commands
+        case action of
+          Just act -> do
+            msg <- act channel body
+            maybe (pure ()) (liftIO . sendTextData conn . encode) msg
+          Nothing -> pure ()
+    Nothing -> pure ()
 
 extractWords :: Text -> [Text]
-extractWords input = Prelude.filter f $ parseOnly Main.words input ^. _Right
-  where f word = not (T.null word) && not (T.all isDigit word)
+extractWords input = filterEmpty $ fixPunctuation <$> filterUris parsed
+  where filterUris xs = Prelude.filter (not . isURI . T.unpack) xs
+        fixPunctuation = dropAround (\w -> isPunctuation w || isDigit w || isSymbol w)
+        filterEmpty = Prelude.filter (not . T.null)
+        parsed = T.split isSpace input
 
