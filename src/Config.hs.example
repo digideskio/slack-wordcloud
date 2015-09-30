@@ -2,9 +2,13 @@
 module Config where
 
 import Data.ByteString (ByteString)
+import Data.Text (Text)
 
 databaseConnection :: ByteString
 databaseConnection = "postgres://user@host/database"
 
 slackToken :: ByteString
 slackToken = "xoxp-***"
+
+adminId :: Text
+adminId = "U..."

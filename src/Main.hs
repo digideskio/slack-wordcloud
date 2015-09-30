@@ -76,13 +76,14 @@ main = runStderrLoggingT $ withPostgresqlPool databaseConnection 10 $ \pool -> d
 isBanned :: MonadIO m => Text -> SqlPersistT m Bool
 isBanned word = isJust <$> selectFirst [BannedWordBody ==. word] []
 
-data Command = Command { commandMatches  :: Text -> Bool
-                       , commandAction   :: Text -> Text -> SqlPersistT IO (Maybe Value)
+data Command = Command { commandMatches     :: Text -> Bool
+                       , commandAction      :: Text -> Text -> SqlPersistT IO (Maybe Value)
+                       , commandPrivileged  :: Bool
                        -- , commandFollowup :: Maybe (Value -> SqlPersistT IO (Maybe Value))
                        }
 
 wordrank :: Command
-wordrank = Command matcher action
+wordrank = Command matcher action False
   where matcher = T.isPrefixOf "!wordrank"
         action channel _ = do
           ranked <- selectList [SlackWordChannelName ==. channel] [Desc SlackWordOccurences, LimitTo 10]
@@ -95,7 +96,7 @@ wordrank = Command matcher action
                                  ]
 
 trackWords :: Command
-trackWords = Command (const True) action
+trackWords = Command (const True) action False
   where action channel body = pure Nothing <* traverse (trackWord channel) (extractWords body)
         trackWord channel word = do
           res <- selectFirst [SlackWordBody ==. word, SlackWordChannelName ==. channel] []
@@ -106,7 +107,7 @@ trackWords = Command (const True) action
               Nothing -> void $ insert $ SlackWord channel word 1
 
 banWords :: Command
-banWords = Command matcher action
+banWords = Command matcher action True
   where matcher = T.isPrefixOf "!wordban"
         action _ body = do
           let words = extractWords (T.drop (T.length "!wordban") body)
@@ -125,7 +126,11 @@ client pool commands conn = forever $ do
       when (Just "message" == msg ^? key "type" . _String) $ do
         let body = msg ^. key "text" . _String
             channel = msg ^. key "channel" . _String
-            action = commandAction <$> List.find (\c -> (commandMatches c) body) commands
+            user = msg ^. key "user" . _String
+            isPrivileged = user == adminId
+            applicableFilter cmd = if commandPrivileged cmd then isPrivileged else True
+            applicableCommands = List.filter applicableFilter commands
+            action = commandAction <$> List.find (\c -> (commandMatches c) body) applicableCommands
         case action of
           Just act -> do
             msg <- act channel body
